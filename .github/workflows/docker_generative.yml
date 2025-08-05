@@ -1,0 +1,94 @@
+name: Self Service Deployment
+
+on: [push]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Where Am I
+      run: pwd
+      
+    - name: list files
+      run: ls -lrth
+      
+    - name: Detect Framework via find
+      run: |
+        FIND_PATH=$(find . -name "pom.xml" -print -quit)
+        if [ -n "$FIND_PATH" ] && find . -path "./src/main/java" | grep -q .; then
+          echo "FRAMEWORK=Java Spring Boot" >> $GITHUB_ENV
+          echo "PORT=8080" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "package.json" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Node.js" >> $GITHUB_ENV
+          echo "PORT=3000" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "angular.json" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Angular" >> $GITHUB_ENV
+          echo "PORT=4200" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "vue.config.js" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Vue.js" >> $GITHUB_ENV
+          echo "PORT=8080" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "manage.py" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Django" >> $GITHUB_ENV
+          echo "PORT=8000" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "app.py" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Flask" >> $GITHUB_ENV
+          echo "PORT=5000" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        elif FIND_PATH=$(find . -name "main.go" -print -quit) && [ -n "$FIND_PATH" ]; then
+          echo "FRAMEWORK=Go" >> $GITHUB_ENV
+          echo "PORT=8080" >> $GITHUB_ENV
+          echo "ENTRY_PATH=$FIND_PATH" >> $GITHUB_ENV
+        else
+          echo "FRAMEWORK=Unknown" >> $GITHUB_ENV
+          echo "PORT=3000" >> $GITHUB_ENV
+          echo "ENTRY_PATH=." >> $GITHUB_ENV
+        fi
+
+    - name: Package Framework Metadata
+      run: |
+        echo "{\"request\": \"Generate a Dockerfile only\", \"framework\": \"$FRAMEWORK\", \"port\": $PORT, \"entry_path\": \"$ENTRY_PATH\"}" > docker_prompt.json
+        cat docker_prompt.json
+    
+    - name: Generate Files with Copilot or Groq (from file prompt)
+      env:
+        API_KEY: ${{ secrets.API_KEY }}
+      run: |
+        PROMPT=$(cat docker_prompt.json | jq -Rs .)  # Read and escape as JSON string
+        jq -n --arg prompt "$PROMPT" '{
+          model: "meta-llama/llama-4-scout-17b-16e-instruct",
+          messages: [{role: "user", content: $prompt}]
+        }' > payload.json
+    
+        curl https://api.groq.com/openai/v1/chat/completions -s \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $API_KEY" \
+          -d @payload.json \
+          -o docker.json
+
+    - name: print docker file
+      run: cat docker.json
+      
+    - name: Read docker.json and extract Dockerfile
+      run: |
+        # Step 2: Extract Dockerfile from response
+        jq -r '.choices[0].message.content' docker.json | \
+          sed -n '/```dockerfile/,/```/p' | \
+          sed '1d;$d' > Dockerfile
+        echo "Extracted Dockerfile:"
+        cat Dockerfile
+
+    - name: Check if Dockerfile exists
+      run: | 
+        if [ ! -f Dockerfile ]; then
+          echo "Dockerfile not found. Exiting."
+          exit 1
+        fi
